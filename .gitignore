@@ -4,3 +4,6 @@ node_modules/
 *.zip
 *.crx
 *.pem
+
+# Landing page (deployed separately to Cloudflare Pages)
+site/
