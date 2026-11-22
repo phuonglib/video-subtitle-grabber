@@ -1,0 +1,5 @@
+{
+  "extName": { "message": "Video & Subtitle Grabber" },
+  "extDesc": { "message": "Phát hiện và tải video (MP4/WebM/HLS) cùng phụ đề (VTT/SRT) đang phát trên trang." },
+  "actionTitle": { "message": "Tải video & phụ đề" }
+}

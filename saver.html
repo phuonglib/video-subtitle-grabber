@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MSE</title>
+  <link rel="icon" href="icons/icon32.png" />
+  <link rel="stylesheet" href="fonts/fonts.css" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    body { max-width: 760px; margin: 0 auto; padding: 24px 16px; font-size: 14px; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    #log { font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-top: 12px; }
+    #log:empty { display: none; }
+    .ok { color: var(--ok); } .err { color: var(--err); }
+    #form { margin-bottom: 16px; }
+    #form .actions { margin-top: 14px; }
+  </style>
+</head>
+<body>
+  <h1 data-i18n="saverTitle"></h1>
+  <div class="muted" id="title" style="margin:-8px 0 12px"></div>
+  <div id="form" hidden>
+    <h2 data-i18n="fileNames"></h2>
+    <div id="names"></div>
+    <div id="modeBox"></div>
+    <div id="subsBox"></div>
+    <div class="actions"><button class="primary" id="save" data-i18n="save"></button></div>
+  </div>
+  <div class="bar"><div id="bar"></div></div>
+  <div class="muted" id="status" style="margin-top:6px" data-i18n="preparing"></div>
+  <div id="log"></div>
+  <p class="muted" data-i18n="keepOpen"></p>
+  <script type="module" src="saver.js"></script>
+</body>
+</html>

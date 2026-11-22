@@ -1,0 +1,5 @@
+{
+  "extName": { "message": "Video & Subtitle Grabber" },
+  "extDesc": { "message": "Detect and download videos (MP4/WebM/HLS) and their subtitles (VTT/SRT) playing on the page." },
+  "actionTitle": { "message": "Download video & subtitles" }
+}

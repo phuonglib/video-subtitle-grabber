@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HLS</title>
+  <link rel="icon" href="icons/icon32.png" />
+  <link rel="stylesheet" href="fonts/fonts.css" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    body { max-width: 760px; margin: 0 auto; padding: 24px 16px; font-size: 14px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .src { word-break: break-all; font-size: 12px; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+    .row > label { min-width: 120px; color: var(--muted); }
+    .row select { flex: 1; min-width: 200px; }
+    #log { font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px; max-height: 260px; overflow: auto; margin-top: 12px; }
+    .ok { color: var(--ok); } .err { color: var(--err); }
+  </style>
+</head>
+<body>
+  <h1 id="title"></h1>
+  <div class="src muted" id="src"></div>
+  <div id="warn" class="warn" hidden></div>
+
+  <div id="form" hidden>
+    <h2 data-i18n="video"></h2>
+    <div class="row" id="variantRow"><label for="variant" data-i18n="quality"></label><select id="variant"></select></div>
+    <div class="row" id="audioRow" hidden><label for="audio" data-i18n="sepAudio"></label><select id="audio"></select></div>
+
+    <h2 data-i18n="fileNames"></h2>
+    <div id="names"></div>
+    <div id="modeBox"></div>
+    <div id="subsBox"></div>
+
+    <div class="row" style="margin-top:16px">
+      <button class="primary" id="start" data-i18n="start"></button>
+      <button id="stop" data-i18n="stop" disabled></button>
+    </div>
+  </div>
+
+  <div class="bar" style="margin-top:12px"><div id="bar"></div></div>
+  <div class="muted" id="status" style="margin-top:6px"></div>
+  <div id="log"></div>
+  <script type="module" src="downloader.js"></script>
+</body>
+</html>

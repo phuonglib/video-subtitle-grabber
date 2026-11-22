@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <title>Video & Subtitle Grabber</title>
+  <link rel="icon" href="icons/icon32.png" />
+  <link rel="stylesheet" href="fonts/fonts.css" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    body { width: 420px; padding: 12px; min-height: 200px; max-height: 580px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    header .title { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    header .tools { display: flex; gap: 6px; align-items: center; }
+    #empty { padding: 16px 0; text-align: center; }
+    #toast { position: fixed; bottom: 10px; left: 12px; right: 12px; text-align: center; background: var(--text); color: var(--bg); border-radius: 6px; padding: 6px; display: none; z-index: 10; }
+    dialog { width: calc(100% - 24px); max-height: calc(100% - 24px); }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="icons/icon32.png" alt="" width="20" height="20" style="flex:none" />
+    <div class="title" id="pageTitle">…</div>
+    <div class="tools" id="tools">
+      <button id="rescan" data-i18n="rescan" data-i18n-title="rescanTitle"></button>
+    </div>
+  </header>
+  <div id="drm" class="warn" hidden></div>
+  <div id="empty" class="muted" data-i18n-html="emptyHtml" hidden></div>
+  <section id="videoSec" hidden>
+    <h2 data-i18n="secVideo"></h2>
+    <div id="videos"></div>
+  </section>
+  <section id="subSec" hidden>
+    <h2 data-i18n="secSubs"></h2>
+    <div id="subs"></div>
+  </section>
+  <dialog id="dlg">
+    <h3 id="dlgTitle"></h3>
+    <div id="dlgBody"></div>
+    <div class="dlg-actions">
+      <button id="dlgCancel" data-i18n="cancel"></button>
+      <button id="dlgOk" class="primary" data-i18n="doDownload"></button>
+    </div>
+  </dialog>
+  <div id="toast"></div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
