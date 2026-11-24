@@ -1,10 +1,11 @@
 import { classify, fileNameFromUrl, formatSize, safeName, urlExt } from './lib/media.js';
 import { parsePlaylist, playlistContentType } from './lib/hls.js';
-import { convert } from './lib/subtitles.js';
+import { convert, isNotSpeech, looksLikeThumbs, parseCues } from './lib/subtitles.js';
+import { getSubText, SubtitleError } from './lib/subfetch.js';
 import { allowReferer } from './lib/net.js';
 import { initI18n, langSelect, t } from './lib/i18n.js';
 import { el, fieldLabel, isConvertibleFormat, modePicker, nameField, subsBlock } from './lib/ui.js';
-import { groupHls, groupSubs, stripQuery } from './lib/group.js';
+import { dirOf, groupHls, groupSubs, stripQuery } from './lib/group.js';
 
 const $ = (id) => document.getElementById(id);
 let tab;
@@ -26,28 +27,57 @@ function scanPage() {
     return `${p(Math.floor(ms / 3600000))}:${p(Math.floor((ms % 3600000) / 60000))}:${p(Math.floor((ms % 60000) / 1000))}.${p(ms % 1000, 3)}`;
   };
   const media = [];
-  for (const v of document.querySelectorAll('video, audio')) {
+  // Trình duyệt tự ghi lại mọi file trang đã tải → thấy phụ đề cả khi extension chưa kịp theo dõi
+  // (vừa cài/cập nhật, service worker đang ngủ, lấy từ cache…).
+  const seen = [];
+  try {
+    for (const e of performance.getEntriesByType('resource')) {
+      if (/\.(vtt|webvtt|srt|ass|ssa|ttml|dfxp)(?=$|[?#])/i.test(e.name)) seen.push({ url: e.name, time: performance.timeOrigin + e.startTime });
+    }
+  } catch {}
+  let pending = false; // còn phụ đề đang nạp dở
+  // Nhiều trình phát (Mux, Vidstack…) đặt <video> trong shadow DOM.
+  const players = [];
+  const walk = (root) => {
+    players.push(...root.querySelectorAll('video, audio'));
+    for (const e of root.querySelectorAll('*')) {
+      let sr = e.shadowRoot;
+      try {
+        sr = sr || (e instanceof HTMLElement ? chrome.dom.openOrClosedShadowRoot(e) : null);
+      } catch {}
+      if (sr) walk(sr);
+    }
+  };
+  walk(document);
+  for (const v of players) {
     const srcs = [v.currentSrc, v.src, ...[...v.querySelectorAll('source')].map((s) => s.src)];
     for (const s of srcs) if (s) media.push({ src: s, tag: v.tagName.toLowerCase(), w: v.videoWidth || 0, h: v.videoHeight || 0 });
   }
   const tracks = [];
-  for (const v of document.querySelectorAll('video')) {
+  const notSubs = []; // <track> ảnh xem trước / chương
+  for (const v of players) {
     for (const t of v.querySelectorAll('track')) {
-      if (t.src) tracks.push({ src: t.src, label: t.label, lang: t.srclang, kind: t.kind });
+      if (t.src && !['subtitles', 'captions'].includes(t.kind)) notSubs.push(t.src);
+      else if (t.src) tracks.push({ src: t.src, label: t.label, lang: t.srclang, kind: t.kind });
     }
     for (const tt of v.textTracks) {
       if (!['subtitles', 'captions'].includes(tt.kind)) continue;
       // Bật "hidden" để trình duyệt nạp cue mà không thay đổi hiển thị.
       if (tt.mode === 'disabled') tt.mode = 'hidden';
-      if (!tt.cues || !tt.cues.length) continue;
+      if (!tt.cues || !tt.cues.length) {
+        pending = true;
+        continue;
+      }
       let out = 'WEBVTT\n\n';
       let n = 0;
+      let end = 0;
       for (const c of tt.cues) {
         if (typeof c.text !== 'string') continue;
+        if (c.endTime > end) end = c.endTime;
         out += `${fmt(c.startTime)} --> ${fmt(c.endTime)}\n${c.text}\n\n`;
         n++;
       }
-      if (n) tracks.push({ vtt: out, label: tt.label, lang: tt.language, kind: tt.kind, count: n });
+      if (n) tracks.push({ vtt: out, label: tt.label, lang: tt.language, kind: tt.kind, count: n, partial: isFinite(v.duration) && v.duration > 0 && end < v.duration * 0.8 });
     }
   }
   return {
@@ -57,6 +87,9 @@ function scanPage() {
     drm: document.documentElement.getAttribute('data-vd-drm'),
     media,
     tracks,
+    notSubs,
+    seen: seen.slice(-200),
+    pending,
   };
 }
 
@@ -139,10 +172,17 @@ async function getText(url) {
 
 async function subText(s) {
   if (s.vtt !== undefined) return s.vtt;
+  const opt = { inline: inlineTexts, tabId: tab.id, frameId: s.frameId, ref: tab.url };
   // Phụ đề HLS dạng nhiều đoạn → tải từng đoạn rồi nối lại (convert() lọc trùng cue).
-  if (s.segs) return (await Promise.all(s.segs.map((u) => getText(u)))).join('\n\n');
-  return getText(s.url);
+  if (s.segs) {
+    const text = (await Promise.all(s.segs.map((u) => getSubText(u, { ...opt, segment: true })))).join('\n\n');
+    if (!text.includes('-->')) throw new SubtitleError('empty');
+    return text;
+  }
+  return getSubText(s.url, { ...opt, anyText: !s.convertible });
 }
+
+const subErrText = (e) => (e instanceof SubtitleError ? t('sub_' + e.code, { d: e.detail }) : e?.message || String(e));
 
 async function saveSubtitle(s, name, fmt) {
   const text = await subText(s);
@@ -154,7 +194,7 @@ async function saveSubtitle(s, name, fmt) {
 
 // Phụ đề dạng văn bản (VTT/SRT) chuyển sang trang khác qua storage.session.
 function portableSubs() {
-  return pageSubs.filter((s) => s.convertible).map(({ label, lang, url, vtt, segs }) => ({ label, lang, url, vtt, segs }));
+  return pageSubs.filter((s) => s.convertible).map(({ label, lang, url, vtt, segs, frameId }) => ({ label, lang, url, vtt, segs, frameId }));
 }
 
 async function stash(data) {
@@ -165,7 +205,7 @@ async function stash(data) {
 
 async function openHlsDownloader(url) {
   const key = await stash({ inline: inlineTexts, subs: portableSubs() });
-  const p = new URLSearchParams({ src: url, ref: tab.url || '', title: pageTitle, key });
+  const p = new URLSearchParams({ src: url, ref: tab.url || '', title: pageTitle, key, tab: tab.id });
   chrome.tabs.create({ url: chrome.runtime.getURL('downloader.html') + '?' + p, index: tab.index + 1 });
 }
 
@@ -222,7 +262,7 @@ function openSaveDialog({ media, subs }) {
     const res = await Promise.allSettled(jobs);
     const fail = res.find((r) => r.status === 'rejected');
     const okN = res.filter((r) => r.status === 'fulfilled').length;
-    if (fail) toast(t('error', { msg: fail.reason?.message || fail.reason }) + (okN ? ` · ${t('toastStartedN', { n: okN })}` : ''));
+    if (fail) toast(t('error', { msg: subErrText(fail.reason) }) + (okN ? ` · ${t('toastStartedN', { n: okN })}` : ''));
     else toast(okN === 1 ? t('toastStarted', { name: names[0] }) : t('toastStartedN', { n: okN }));
   };
   cancel.onclick = close;
@@ -242,6 +282,34 @@ function parseHls(url) {
     );
   }
   return plCache.get(url);
+}
+
+// Xem nội dung từng file .vtt/.srt để loại ảnh xem trước, chương… (kết quả giữ qua các lần quét).
+const notSpeech = new Map();
+const fetchedTexts = {};
+function checkNotSpeech(s) {
+  if (!s.url || !s.convertible) return false;
+  const text = inlineTexts[s.url];
+  if (text !== undefined) return isNotSpeech(parseCues(text));
+  const k = stripQuery(s.url);
+  if (!notSpeech.has(k)) {
+    notSpeech.set(
+      k,
+      Promise.race([
+        allowReferer(s.url, tab.url)
+          .then(() => fetch(s.url, { credentials: 'include' }))
+          .then(async (r) => {
+            if (!r.ok) return looksLikeThumbs(s.url);
+            const text = await r.text();
+            const cues = parseCues(text);
+            if (cues.length && !isNotSpeech(cues) && text.length < 2e6) fetchedTexts[s.url] = inlineTexts[s.url] = text; // dùng luôn khi tải, khỏi lo link hết hạn
+            return isNotSpeech(cues);
+          }),
+        new Promise((res) => setTimeout(() => res(looksLikeThumbs(s.url)), 4000)),
+      ]).catch(() => looksLikeThumbs(s.url))
+    );
+  }
+  return notSpeech.get(k);
 }
 
 function fmtDur(sec) {
@@ -394,9 +462,15 @@ function recorderCard(container, frameId, base) {
 }
 
 let renderId = 0;
+let stillLoading = false;
 async function render() {
   const myId = ++renderId;
-  const [netItems, frames] = await Promise.all([chrome.runtime.sendMessage({ type: 'getMedia', tabId: tab.id }), scanFrames()]);
+  const [netItems, frames, nav] = await Promise.all([
+    chrome.runtime.sendMessage({ type: 'getMedia', tabId: tab.id }),
+    scanFrames(),
+    chrome.runtime.sendMessage({ type: 'getNav', tabId: tab.id }).catch(() => ({})),
+  ]);
+  const cut = nav?.cut || 0;
   if (myId !== renderId) return; // đã có lần quét mới hơn
   const top = frames.find((f) => f.top);
   pageTitle = top?.title || tab.title || 'video';
@@ -412,17 +486,27 @@ async function render() {
   const put = (it) => {
     const old = items.get(it.url);
     if (!old) items.set(it.url, it);
-    else old.time = Math.max(old.time || 0, it.time || 0);
+    else {
+      old.time = Math.max(old.time || 0, it.time || 0);
+      if (old.frameId == null) old.frameId = it.frameId;
+      if (!old.label) old.label = it.label;
+      if (!old.lang) old.lang = it.lang;
+    }
   };
   for (const it of netItems || []) put({ ...it });
-  inlineTexts = {};
+  inlineTexts = { ...fetchedTexts };
   let blobVideos = 0;
   const now = Date.now();
   for (const f of frames) {
     // Playlist / phụ đề nhận ra nhờ soi nội dung (kể cả URL ngụy trang hoặc blob:)
     for (const fd of f.vd?.found || []) {
       if (fd.text !== undefined) inlineTexts[fd.url] = fd.text;
-      put({ kind: fd.kind, format: fd.format, url: fd.url, time: fd.time || 0, sniffed: true });
+      if (fd.kind !== 'subtitle' && (fd.time || 0) < cut) continue; // video của trang trước (SPA)
+      put({ kind: fd.kind, format: fd.format, url: fd.url, time: fd.time || 0, sniffed: true, frameId: f.frameId });
+    }
+    for (const r of f.seen || []) {
+      const info = classify(r.url);
+      if (info?.kind === 'subtitle') put({ ...info, url: r.url, time: r.time, frameId: f.frameId });
     }
     for (const m of f.media) {
       if (m.src.startsWith('blob:') || m.src.startsWith('mediasource:')) {
@@ -437,7 +521,7 @@ async function render() {
       x.time = now;
     }
     for (const tr of f.tracks) {
-      if (tr.src) put({ kind: 'subtitle', format: urlExt(tr.src) || 'vtt', url: tr.src, label: tr.label, lang: tr.lang, time: now - 1 });
+      if (tr.src) put({ kind: 'subtitle', format: urlExt(tr.src) || 'vtt', url: tr.src, label: tr.label, lang: tr.lang, time: now - 1, frameId: f.frameId });
     }
   }
 
@@ -475,6 +559,8 @@ async function render() {
       url: it.url,
       size: it.size,
       time: it.time || 0,
+      frameId: it.frameId,
+      stale: (it.time || 0) < cut,
     });
   }
   for (const f of frames) {
@@ -488,11 +574,27 @@ async function render() {
         ext: 'vtt',
         vtt: tr.vtt,
         count: tr.count,
+        partial: tr.partial,
         cues: true,
         time: now,
       });
     }
   }
+  // Bỏ file .vtt không phải phụ đề (ảnh xem trước, chương). Đoạn HLS rất nhiều → chỉ kiểm tra vài file mỗi thư mục.
+  const ignore = new Set(frames.flatMap((f) => f.notSubs || []).map(stripQuery));
+  const perDir = new Map();
+  const bad = await Promise.all(
+    rawSubs.map((s) => {
+      if (!s.url) return isNotSpeech(parseCues(s.vtt || ''));
+      if (ignore.has(stripQuery(s.url))) return true;
+      const d = dirOf(s.url);
+      const n = (perDir.get(d) || 0) + 1;
+      perDir.set(d, n);
+      return n <= 6 || inlineTexts[s.url] !== undefined ? checkNotSpeech(s) : false;
+    })
+  );
+  if (myId !== renderId) return;
+  for (let i = rawSubs.length - 1; i >= 0; i--) if (bad[i]) rawSubs.splice(i, 1);
   const mainHlsHasSubs = main?.type === 'hls' && main.g.pl?.isMaster && main.g.pl.media.some((m) => m.TYPE === 'SUBTITLES' && m.URI);
   const sg = groupSubs(rawSubs, { dropSegments: mainHlsHasSubs });
   for (const s of [...sg.primary, ...sg.others]) {
@@ -587,6 +689,7 @@ async function render() {
     for (const s of otherSubs) subCard(box, s);
   }
 
+  stillLoading = frames.some((f) => f.pending);
   if (needRerender) setTimeout(render, 700);
 
   $('videoSec').hidden = !nVideo && !blobVideos;
@@ -608,5 +711,13 @@ async function render() {
   checkSiteAccess();
   await render();
   // Lần quét thứ 2: các textTrack vừa được bật "hidden" sẽ có cue.
-  setTimeout(render, 900);
+  setTimeout(async () => {
+    await render();
+    // Mạng chậm: phụ đề còn đang nạp → quét thêm vài lần thay vì bắt người dùng tải lại trang.
+    for (const wait of [1500, 3000]) {
+      if (!stillLoading) break;
+      await new Promise((r) => setTimeout(r, wait));
+      if (!$('dlg').open) await render();
+    }
+  }, 900);
 })();

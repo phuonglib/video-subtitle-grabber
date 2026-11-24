@@ -1,6 +1,6 @@
 {
   "name": "video-subtitle-grabber",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "private": true,
   "description": "Chrome extension that saves the playing video together with its subtitles.",
   "license": "MIT",

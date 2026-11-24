@@ -1,6 +1,7 @@
 import { parsePlaylist, playlistContentType, describeVariant } from './lib/hls.js';
 import { allowReferer, fetchWithRetry, getRecordedHeaders } from './lib/net.js';
 import { convert } from './lib/subtitles.js';
+import { getSubText, SubtitleError } from './lib/subfetch.js';
 import { safeName, formatSize } from './lib/media.js';
 import { initI18n, t } from './lib/i18n.js';
 import { el, fieldLabel, modePicker, nameField, subsBlock } from './lib/ui.js';
@@ -130,16 +131,20 @@ async function downloadStream(url, label, isAudio, name, signal) {
   return filename;
 }
 
+const TAB = params.has('tab') ? +params.get('tab') : undefined;
+const subErrText = (e) => (e instanceof SubtitleError ? t('sub_' + e.code, { d: e.detail }) : e.message);
+
 async function downloadSubtitle(media, fmt, name, signal) {
+  const opt = { inline, tabId: TAB, frameId: media.frameId, ref: REF, signal };
   log(t('subLog', { name: [media.NAME, media.LANGUAGE].filter(Boolean).join(' · ') || name }));
   let vttText;
   if (media.vtt !== undefined) {
     vttText = media.vtt;
   } else if (media.segs) {
     await prepareHosts(media.segs);
-    vttText = (await Promise.all(media.segs.map((u) => (inline[u] !== undefined ? inline[u] : fetchWithRetry(u, { as: 'text', signal }))))).join('\n\n');
+    vttText = (await Promise.all(media.segs.map((u) => getSubText(u, { ...opt, segment: true })))).join('\n\n');
   } else {
-    const first = await getText(media.URI, signal);
+    const first = await getSubText(media.URI, opt);
     if (first.trimStart().startsWith('#EXTM3U')) {
       const pl = parsePlaylist(first, /^https?:/.test(media.URI) ? media.URI : REF);
       await prepareHosts(pl.segments.map((s) => s.url));
@@ -148,7 +153,8 @@ async function downloadSubtitle(media, fmt, name, signal) {
       const worker = async () => {
         while (next < pl.segments.length) {
           const i = next++;
-          texts[i] = await fetchWithRetry(pl.segments[i].url, { as: 'text', range: pl.segments[i].range, signal });
+          const { url, range } = pl.segments[i];
+          texts[i] = range ? await fetchWithRetry(url, { as: 'text', range, signal }) : await getSubText(url, { ...opt, segment: true });
         }
       };
       await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pl.segments.length) }, worker));
@@ -157,6 +163,7 @@ async function downloadSubtitle(media, fmt, name, signal) {
       vttText = first;
     }
   }
+  if (!vttText.includes('-->')) throw new SubtitleError('empty');
   const out = convert(vttText, fmt);
   await save(new Blob([out], { type: fmt === 'srt' ? 'application/x-subrip' : 'text/vtt' }), `${name}.${fmt}`);
 }
@@ -241,7 +248,7 @@ async function init() {
     }
     $('form').hidden = false;
     // Phụ đề lấy từ trang (popup) — dùng khi playlist không khai báo phụ đề.
-    const fromPage = pageSubs.map((s) => ({ URI: s.url, NAME: s.label, LANGUAGE: s.lang, vtt: s.vtt, segs: s.segs }));
+    const fromPage = pageSubs.map((s) => ({ URI: s.url, NAME: s.label, LANGUAGE: s.lang, vtt: s.vtt, segs: s.segs, frameId: s.frameId }));
     if (pl.isMaster) {
       master = pl;
       pl.variants.forEach((v) => $('variant').append(new Option(describeVariant(v), v.url)));
@@ -283,20 +290,21 @@ async function start() {
   progress(0);
   const files = [];
   try {
-    if (wantVideo) {
-      files.push(await downloadStream($('variant').value, t('video'), false, ui.video.value(), signal));
-      if (!$('audioRow').hidden && $('audio').value) {
-        progress(0);
-        files.push(await downloadStream($('audio').value, t('audio'), true, ui.audio.value(), signal));
-      }
-    }
+    // Phụ đề trước: link phụ đề thường hết hạn trong lúc tải video dài.
     const fmt = ui.subs?.format() || 'srt';
     for (const { sub, name } of subs) {
       try {
         await downloadSubtitle(sub.media, fmt, name, signal);
       } catch (e) {
         if (signal.aborted) throw e;
-        log(t('subErr', { msg: e.message }), 'err');
+        log(t('subErr', { msg: subErrText(e) }), 'err');
+      }
+    }
+    if (wantVideo) {
+      files.push(await downloadStream($('variant').value, t('video'), false, ui.video.value(), signal));
+      if (!$('audioRow').hidden && $('audio').value) {
+        progress(0);
+        files.push(await downloadStream($('audio').value, t('audio'), true, ui.audio.value(), signal));
       }
     }
     progress(1);

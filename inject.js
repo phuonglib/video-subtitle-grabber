@@ -7,7 +7,7 @@
   if (window.__vd) return;
   // late = script được chèn sau khi trang đã chạy (popup tự chèn) → có thể đã lỡ init segment
   const S = (window.__vd = { drm: null, drmProbe: null, found: [], sbs: [], recording: false, late: document.readyState !== 'loading' });
-  const MAX_FOUND = 100;
+  const MAX_FOUND = 300;
   const MAX_TEXT = 2 * 1024 * 1024;
 
   // ---------- 1. DRM ----------
@@ -42,12 +42,19 @@
     return null;
   }
   function record(url, kind, text) {
-    if (!url || S.found.some((f) => f.url === url)) return;
+    if (!url) return;
+    // Player tải lại cùng URL (đổi bài, mở lại) → cập nhật thời điểm và nội dung mới nhất.
+    const old = S.found.findIndex((f) => f.url === url);
+    if (old >= 0) S.found.splice(old, 1);
     const item = { url, kind, time: Date.now(), format: kind === 'hls' ? 'm3u8' : kind === 'dash' ? 'mpd' : text.trimStart().startsWith('WEBVTT') ? 'vtt' : 'srt' };
     // Chỉ giữ nội dung khi URL không tải lại được từ ngoài trang (blob:/data:)
     if (!/^https?:/.test(url) || kind === 'subtitle') item.text = text.length <= MAX_TEXT ? text : undefined;
     S.found.push(item);
-    if (S.found.length > MAX_FOUND) S.found.shift();
+    if (S.found.length > MAX_FOUND) {
+      // Ưu tiên bỏ playlist cũ; phụ đề giữ lại lâu hơn.
+      const i = S.found.findIndex((f) => f.kind !== 'subtitle');
+      S.found.splice(i >= 0 && i < S.found.length - 1 ? i : 0, 1);
+    }
   }
   const SKIP_CT = /^(video\/(?!.*mpegurl)|audio\/(?!.*mpegurl)|font\/|text\/css|text\/html|application\/(javascript|wasm)|text\/javascript)/i;
 

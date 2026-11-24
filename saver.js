@@ -1,7 +1,7 @@
 import { pullTrack } from './lib/transfer.js';
 import { formatSize, safeName } from './lib/media.js';
 import { convert } from './lib/subtitles.js';
-import { allowReferer } from './lib/net.js';
+import { getSubText, SubtitleError } from './lib/subfetch.js';
 import { initI18n, t } from './lib/i18n.js';
 import { el, fieldLabel, modePicker, nameField, subsBlock } from './lib/ui.js';
 
@@ -53,10 +53,11 @@ async function loadStash() {
 
 async function subText(s, inline) {
   if (s.vtt !== undefined) return s.vtt;
-  if (s.segs) return (await Promise.all(s.segs.map((u) => subText({ url: u }, inline)))).join('\n\n');
-  if (inline[s.url] !== undefined) return inline[s.url];
-  await allowReferer(s.url, REF);
-  return (await fetch(s.url, { credentials: 'include' })).text();
+  const opt = { inline, tabId, frameId: s.frameId ?? frameId, ref: REF };
+  if (!s.segs) return getSubText(s.url, opt);
+  const text = (await Promise.all(s.segs.map((u) => getSubText(u, { ...opt, segment: true })))).join('\n\n');
+  if (!text.includes('-->')) throw new SubtitleError('empty');
+  return text;
 }
 
 (async () => {
@@ -141,7 +142,7 @@ async function subText(s, inline) {
           await save(new Blob([out], { type: fmt === 'srt' ? 'application/x-subrip' : 'text/vtt' }), `${name}.${fmt}`);
           log(t('savedTo', { name: `${name}.${fmt}`, size: formatSize(out.length) }), 'ok');
         } catch (e) {
-          log(t('subErr', { msg: e.message }), 'err');
+          log(t('subErr', { msg: e instanceof SubtitleError ? t('sub_' + e.code, { d: e.detail }) : e.message }), 'err');
         }
       }
     }

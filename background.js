@@ -1,5 +1,6 @@
 // Service worker: lắng nghe request mạng của từng tab, ghi lại các URL video / playlist / phụ đề.
 import { classify } from './lib/media.js';
+import { navCut } from './lib/nav.js';
 
 const MAX_ITEMS = 200;
 const mem = new Map(); // tabId -> { [url]: item }
@@ -46,6 +47,15 @@ async function clearTab(tabId) {
   mem.set(tabId, {});
   persist(tabId);
 }
+
+// Lúc trình duyệt thật sự tải một trang mới trong tab (khác với SPA chỉ đổi URL).
+const mainAt = new Map();
+chrome.webRequest.onBeforeRequest.addListener(
+  (d) => {
+    if (d.tabId >= 0) mainAt.set(d.tabId, Date.now());
+  },
+  { urls: ['<all_urls>'], types: ['main_frame'] }
+);
 
 chrome.webRequest.onHeadersReceived.addListener(
   (d) => {
@@ -104,16 +114,38 @@ chrome.webRequest.onSendHeaders.addListener(
 );
 
 chrome.tabs.onUpdated.addListener((tabId, info) => {
-  if (info.status === 'loading' && info.url) clearTab(tabId);
+  if (info.url) onNavigate(tabId, info.url).catch(() => {});
 });
+const navKey = (tabId) => 'nav_' + tabId;
+const getNav = async (tabId) => (await chrome.storage.session.get(navKey(tabId)))[navKey(tabId)] || {};
+async function onNavigate(tabId, url) {
+  const nav = await getNav(tabId);
+  const full = mainAt.get(tabId) || 0;
+  mainAt.delete(tabId);
+  const now = Date.now();
+  const cut = navCut({ oldUrl: nav.url, newUrl: url, now, mainAt: full });
+  await chrome.storage.session.set({ [navKey(tabId)]: { url, cut: cut || nav.cut || 0 } });
+  if (!cut) return; // chỉ đổi query/hash → giữ nguyên
+  const items = await getTab(tabId);
+  // Tải trang mới: bỏ mục của trang cũ. SPA: giữ phụ đề cũ (popup xếp vào "phụ đề khác"), bỏ video cũ.
+  for (const [u, it] of Object.entries(items)) {
+    if (it.time < cut && (full || it.kind !== 'subtitle')) delete items[u];
+  }
+  persist(tabId);
+}
 chrome.tabs.onRemoved.addListener((tabId) => {
   mem.delete(tabId);
-  chrome.storage.session.remove(key(tabId)).catch(() => {});
+  mainAt.delete(tabId);
+  chrome.storage.session.remove([key(tabId), navKey(tabId)]).catch(() => {});
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg?.type === 'getMedia') {
     getTab(msg.tabId).then((items) => reply(Object.values(items).sort((a, b) => a.time - b.time)));
+    return true;
+  }
+  if (msg?.type === 'getNav') {
+    getNav(msg.tabId).then(reply);
     return true;
   }
   if (msg?.type === 'clearMedia') {
