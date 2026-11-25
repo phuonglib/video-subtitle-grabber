@@ -2,6 +2,8 @@ import { classify, fileNameFromUrl, formatSize, safeName, urlExt } from './lib/m
 import { parsePlaylist, playlistContentType } from './lib/hls.js';
 import { convert, isNotSpeech, looksLikeThumbs, parseCues } from './lib/subtitles.js';
 import { getSubText, SubtitleError } from './lib/subfetch.js';
+import { mvhdDuration } from './lib/mp4.js';
+import { ytdlpCommand } from './lib/cli.js';
 import { allowReferer } from './lib/net.js';
 import { initI18n, langSelect, t } from './lib/i18n.js';
 import { el, fieldLabel, isConvertibleFormat, modePicker, nameField, subsBlock } from './lib/ui.js';
@@ -51,9 +53,25 @@ function scanPage() {
   walk(document);
   for (const v of players) {
     const srcs = [v.currentSrc, v.src, ...[...v.querySelectorAll('source')].map((s) => s.src)];
-    for (const s of srcs) if (s) media.push({ src: s, tag: v.tagName.toLowerCase(), w: v.videoWidth || 0, h: v.videoHeight || 0 });
+    const box = v.getBoundingClientRect();
+    const visible = v.tagName === 'AUDIO' || box.width * box.height > 400;
+    for (const s of srcs) if (s) media.push({ src: s, visible, tag: v.tagName.toLowerCase(), w: v.videoWidth || 0, h: v.videoHeight || 0 });
   }
   const tracks = [];
+  // Video đang phát (để chọn đúng file khi trang tải trước nhiều video).
+  let playing = 0;
+  let best = -1;
+  for (const v of players) {
+    if (v.paused || !isFinite(v.duration)) continue;
+    const r = v.getBoundingClientRect();
+    const w = Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0));
+    const h = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
+    const score = w * h + (v.muted ? 0 : 1);
+    if (score > best) {
+      best = score;
+      playing = v.duration;
+    }
+  }
   const notSubs = []; // <track> ảnh xem trước / chương
   for (const v of players) {
     for (const t of v.querySelectorAll('track')) {
@@ -88,6 +106,7 @@ function scanPage() {
     media,
     tracks,
     notSubs,
+    playing,
     seen: seen.slice(-200),
     pending,
   };
@@ -97,8 +116,8 @@ async function scanFrames() {
   try {
     const target = { tabId: tab.id, allFrames: true };
     const [iso, main] = await Promise.all([
-      chrome.scripting.executeScript({ target, func: scanPage }),
-      chrome.scripting.executeScript({ target, world: 'MAIN', func: () => (window.__vd ? window.__vd.status() : null) }).catch(() => []),
+      chrome.scripting.executeScript({ target, func: scanPage, injectImmediately: true }),
+      chrome.scripting.executeScript({ target, injectImmediately: true, world: 'MAIN', func: () => (window.__vd ? window.__vd.status() : null) }).catch(() => []),
     ]);
     const byFrame = new Map(main.map((r) => [r.frameId, r.result]));
     return iso.filter((r) => r.result).map((r) => ({ ...r.result, frameId: r.frameId, vd: byFrame.get(r.frameId) || null }));
@@ -112,6 +131,7 @@ async function vdCall(frameId, method, args = []) {
   const [r] = await chrome.scripting.executeScript({
     target: { tabId: tab.id, frameIds: [frameId] },
     world: 'MAIN',
+    injectImmediately: true,
     func: (m, a) => (window.__vd && window.__vd[m] ? window.__vd[m](...a) : null),
     args: [method, args],
   });
@@ -135,9 +155,9 @@ function copy(text) {
   navigator.clipboard.writeText(text).then(() => toast(t('copied')));
 }
 
-function cliCommand(url) {
-  const ref = tab.url && /^https?:/.test(tab.url) ? ` --referer "${tab.url}"` : '';
-  return `yt-dlp${ref} -o "${safeName(pageTitle)}.%(ext)s" "${url}"`;
+const WIN = /win/i.test(navigator.userAgentData?.platform || navigator.platform);
+function cliCommand(url, page = false) {
+  return ytdlpCommand({ url, title: pageTitle, ref: tab.url, page, win: WIN });
 }
 
 function btn(label, onClick, primary) {
@@ -248,7 +268,13 @@ function openSaveDialog({ media, subs }) {
     if (media) {
       const fname = `${vf.value()}.${media.ext}`;
       names.push(fname);
-      jobs.push(allowReferer(media.url, tab.url).then(() => download(media.url, fname)));
+      jobs.push(
+        allowReferer(media.url, tab.url)
+          .then(() => chrome.runtime.sendMessage({ type: 'downloadMedia', url: media.url, filename: fname, ref: tab.url, index: tab.index + 1 }))
+          .then((r) => {
+            if (r?.error) throw new Error(r.error);
+          })
+      );
     }
     if (block && mode?.value() !== 'video') {
       const fmt = block.format();
@@ -310,6 +336,18 @@ function checkNotSpeech(s) {
     );
   }
   return notSpeech.get(k);
+}
+
+const mp4Len = new Map();
+function mp4Length(url) {
+  const k = stripQuery(url);
+  if (!mp4Len.has(k)) {
+    const job = allowReferer(url, tab.url)
+      .then(() => fetch(url, { credentials: 'include', headers: { Range: 'bytes=0-4095' } }))
+      .then(async (r) => (r.status === 206 ? mvhdDuration(new Uint8Array(await r.arrayBuffer())) : (r.body?.cancel(), 0)));
+    mp4Len.set(k, Promise.race([job, new Promise((res) => setTimeout(() => res(0), 4000))]).catch(() => 0));
+  }
+  return mp4Len.get(k);
 }
 
 function fmtDur(sec) {
@@ -412,7 +450,8 @@ function stopPolls() {
   polls = [];
 }
 
-function recorderCard(container, frameId, base) {
+function recorderCard(container, frame, base) {
+  const { frameId } = frame;
   const rate = el('select');
   for (const r of [1, 2, 4, 8, 16]) rate.append(new Option(`${r}×`, r));
   rate.value = '4';
@@ -436,6 +475,13 @@ function recorderCard(container, frameId, base) {
     refresh();
   });
   const ui = card(container, { tag: 'MSE', name: t('mseName'), meta: '…', actions: [rate, bStart, bStop, bClear] });
+  // Trang video lớn: lệnh yt-dlp cho trang đang xem (video nhúng → trang của khung nhúng).
+  const pageUrl = /^https?:/.test(frame.url) ? frame.url : tab.url;
+  if (/^https?:/.test(pageUrl || '') && !frame.vd?.drm) {
+    const b = btn(t('copyYtdlp'), () => copy(cliCommand(pageUrl, true)));
+    b.title = t('ytdlpTitle');
+    ui.actions.append(b);
+  }
   ui.el.append(el('div', 'meta', t('mseHint')));
 
   async function refresh() {
@@ -501,7 +547,6 @@ async function render() {
     // Playlist / phụ đề nhận ra nhờ soi nội dung (kể cả URL ngụy trang hoặc blob:)
     for (const fd of f.vd?.found || []) {
       if (fd.text !== undefined) inlineTexts[fd.url] = fd.text;
-      if (fd.kind !== 'subtitle' && (fd.time || 0) < cut) continue; // video của trang trước (SPA)
       put({ kind: fd.kind, format: fd.format, url: fd.url, time: fd.time || 0, sniffed: true, frameId: f.frameId });
     }
     for (const r of f.seen || []) {
@@ -515,10 +560,10 @@ async function render() {
       }
       // Đang gắn vào thẻ <video> → coi là đang phát.
       const info = classify(m.src) || { kind: m.tag === 'audio' ? 'audio' : 'video', format: urlExt(m.src) || 'mp4' };
-      put({ ...info, url: m.src, time: now, dims: m.w ? `${m.w}×${m.h}` : '' });
+      put({ ...info, url: m.src, time: m.visible ? now : cut, dims: m.w ? `${m.w}×${m.h}` : '' });
       const x = items.get(m.src);
       if (m.w) x.dims = `${m.w}×${m.h}`;
-      x.time = now;
+      if (m.visible) x.time = now;
     }
     for (const tr of f.tracks) {
       if (tr.src) put({ kind: 'subtitle', format: urlExt(tr.src) || 'vtt', url: tr.src, label: tr.label, lang: tr.lang, time: now - 1, frameId: f.frameId });
@@ -542,8 +587,18 @@ async function render() {
   const videos = [
     ...hlsGroups.map((g) => ({ type: 'hls', g, time: g.activity })),
     ...[...fileGroups.values()].map((it) => ({ type: it.kind === 'dash' ? 'dash' : 'file', it, time: it.time || 0 })),
-  ].sort((a, b) => b.time - a.time);
-  const main = videos[0];
+  ];
+  // Trang tải trước nhiều video → so thời lượng file với video đang phát.
+  const playing = frames.map((f) => f.playing).find(Boolean) || 0;
+  const filesOnly = videos.filter((v) => v.type === 'file' && v.it.kind === 'video');
+  if (playing && filesOnly.length > 1) {
+    await Promise.all(filesOnly.slice(-12).map(async (v) => (v.match = Math.abs((await mp4Length(v.it.url)) - playing) < 0.35)));
+    if (myId !== renderId) return;
+  }
+  const rank = (v) => (v.match ? 2 : v.time >= cut ? 1 : 0);
+  videos.sort((a, b) => rank(b) - rank(a) || b.time - a.time);
+  // Video của trang trước (SPA) không được coi là video đang phát.
+  const main = videos.length && rank(videos[0]) ? videos[0] : null;
 
   // ---- Phụ đề: 1 phụ đề / ngôn ngữ cho video đang phát, phần còn lại thu gọn ----
   const rawSubs = [];
@@ -644,7 +699,7 @@ async function render() {
     const active = f.vd?.sbs?.filter((s) => s.appends > 0) || [];
     const hasBlob = f.media.some((m) => /^(blob|mediasource):/.test(m.src));
     if (active.length) {
-      recorderCard($('videos'), f.frameId, base);
+      recorderCard($('videos'), f, base);
       nVideo++;
     } else if (hasBlob && !f.vd) {
       if (!injectedFrames.has(f.frameId)) {
@@ -665,9 +720,10 @@ async function render() {
     }
   }
 
-  if (videos.length > 1) {
-    const box = moreBox($('videos'), t('otherVideos', { n: videos.length - 1 }), 'videos');
-    for (const v of videos.slice(1)) videoCard(box, v);
+  const rest = main ? videos.slice(1) : videos;
+  if (rest.length) {
+    const box = moreBox($('videos'), t('otherVideos', { n: rest.length }), 'videos');
+    for (const v of rest) videoCard(box, v);
   }
 
   // Thẻ phụ đề: mỗi phụ đề mở hộp thoại riêng (sửa tên, chọn định dạng).

@@ -1,0 +1,10 @@
+import assert from 'assert';
+import { execFileSync } from 'child_process';
+const { ytdlpCommand } = await import('../lib/cli.js');
+const run = (c) => execFileSync('/bin/sh', ['-c', c.replace(/^yt-dlp/, "printf '%s\\n'")], { encoding: 'utf8' }).trim().split('\n');
+const evil = `It's $(touch /tmp/vd_pwn) \`id\` 100% "x"`;
+const a = run(ytdlpCommand({ url: "https://v.com/w?a=1&b=$(id)'", title: evil, page: true }));
+assert.deepEqual(a, ['--no-playlist', '--write-subs', '--sub-langs', 'vi,en', '-o', "It's $(touch tmp vd_pwn) `id` 100%% x.%(ext)s", 'https://v.com/w?a=1&b=%24(id)%27']);
+const w = ytdlpCommand({ url: 'https://v.com/a', title: evil, ref: 'https://v.com/', win: true });
+assert.ok(!/[$`]/.test(w) && w.includes('--referer "https://v.com/"'));
+console.log('CLI OK');
